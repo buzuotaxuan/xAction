@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * X 书签 → Notion（增量同步）
- *
- * 环境变量 (在 GitHub Actions Secrets 中配置):
- *   X_AUTH_TOKEN        X auth_token
- *   NOTION_TOKEN        Notion Integration Token
- *   NOTION_DATABASE_ID  Notion 数据库 ID
+ * X 书签 → Notion（增量同步，按时间过滤）
  */
 
 import puppeteer from 'puppeteer';
@@ -96,17 +91,25 @@ async function getLatestTime(token, databaseId) {
       }),
     });
 
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.log(`   ⚠️  Notion query 返回 ${resp.status}`);
+      return null;
+    }
 
     const data = await resp.json();
+    console.log(`   📋 查询结果: ${data.results.length} 条`);
+
     if (data.results.length === 0) return null;
 
     const timeProp = data.results[0].properties['Time'];
+    console.log(`   📋 Time 属性: type=${timeProp?.type}, value=${JSON.stringify(timeProp)}`);
+
     if (timeProp?.type === 'date' && timeProp.date?.start) {
       return timeProp.date.start;
     }
     return null;
-  } catch {
+  } catch (err) {
+    console.log(`   ❌ getLatestTime 异常: ${err.message}`);
     return null;
   }
 }
@@ -121,17 +124,21 @@ async function main() {
   const authToken = process.env.X_AUTH_TOKEN;
 
   if (!notionToken || !databaseId || !authToken) {
-    console.error('❌ 缺少环境变量: NOTION_TOKEN, NOTION_DATABASE_ID, X_AUTH_TOKEN');
+    console.error('❌ 缺少环境变量');
     process.exit(1);
   }
 
   console.log(`🚀 X 书签 → Notion (${new Date().toISOString()})`);
+  console.log('='.repeat(60));
 
   const notion = new Client({ auth: notionToken });
 
+  console.log('📋 获取 Notion 最新记录...');
   const latestTimeStr = await getLatestTime(notionToken, databaseId);
+
   if (latestTimeStr) {
-    console.log(`📋 Notion 最新: ${latestTimeStr}`);
+    console.log(`📋 Notion 最新时间: "${latestTimeStr}"`);
+    console.log(`📋 解析为 ms: ${new Date(latestTimeStr).getTime()}`);
   } else {
     console.log('📋 数据库为空，全量同步');
   }
@@ -158,18 +165,43 @@ async function main() {
       return;
     }
 
+    console.log(`📥 共抓取 ${bookmarks.length} 条\n`);
+
+    // ==== 时间对比日志 ====
+    if (latestTimeStr) {
+      console.log('─── 时间对比分析 ───');
+      const latestMs = new Date(latestTimeStr).getTime();
+
+      for (let i = 0; i < Math.min(bookmarks.length, 10); i++) {
+        const bm = bookmarks[i];
+        const title = bm.text ? bm.text.split('\n')[0].slice(0, 50) : '?';
+        const bmTime = bm.time;
+        const bmMs = bmTime ? new Date(bmTime).getTime() : NaN;
+
+        if (isNaN(bmMs)) {
+          console.log(`  [${i + 1}] 时间无效: "${bmTime}" → ${title}`);
+        } else {
+          const isNew = bmMs > latestMs;
+          console.log(`  [${i + 1}] ${isNew ? '✅新' : '⏭跳过'} bm="${bmTime}" (${bmMs}) vs notion="${latestTimeStr}" (${latestMs}) → ${title}`);
+        }
+      }
+      console.log(`  ... (共 ${bookmarks.length} 条)`);
+      console.log('───\n');
+    }
+
+    // 时间过滤
     let filtered = bookmarks;
-    let skipped = 0;
     if (latestTimeStr) {
       const latestMs = new Date(latestTimeStr).getTime();
       filtered = bookmarks.filter(bm => {
         if (!bm.time) return true;
-        return new Date(bm.time).getTime() > latestMs;
+        const bmMs = new Date(bm.time).getTime();
+        return !isNaN(bmMs) && bmMs > latestMs;
       });
-      skipped = bookmarks.length - filtered.length;
     }
 
-    console.log(`共 ${bookmarks.length} 条，新增 ${filtered.length} 条${skipped > 0 ? ` (跳过 ${skipped} 条)` : ''}`);
+    const skipped = bookmarks.length - filtered.length;
+    console.log(`需同步 ${filtered.length} 条${skipped > 0 ? ` (跳过 ${skipped} 条)` : ''}\n`);
 
     if (filtered.length === 0) {
       console.log('✨ 无新增');
@@ -182,37 +214,37 @@ async function main() {
       const bm = filtered[i];
       const title = bm.text ? bm.text.split('\n')[0].slice(0, 80) : '(无文字)';
 
-      if (bm.link) {
-        try {
-          const tweet = await extractTweetContent(page, bm.link);
-          if (tweet.text.length > 0) {
-            const blocks = buildBlocks(tweet.text, tweet.images, bm.link);
+      try {
+        process.stdout.write(`📥 ${i + 1}/${filtered.length} ${title}... `);
+        const tweet = await extractTweetContent(page, bm.link);
 
-            await notion.pages.create({
-              parent: { database_id: databaseId },
-              properties: {
-                Name: { title: [{ text: { content: title } }] },
-                Author: { rich_text: [{ text: { content: bm.author || '' } }] },
-                Link: { url: bm.link || '' },
-                Time: { date: { start: bm.time || new Date().toISOString() } },
-              },
-              children: blocks,
-            });
+        if (tweet.text.length > 0) {
+          const blocks = buildBlocks(tweet.text, tweet.images, bm.link);
 
-            uploaded++;
-            console.log(`   ✅ ${i + 1}/${filtered.length} ${title}`);
-          } else {
-            console.log(`   ⚠️  ${i + 1}/${filtered.length} 文本为空`);
-          }
-        } catch (err) {
-          console.error(`   ❌ ${i + 1}/${filtered.length} ${err.message}`);
-          if (err.code === 'validation_error' || err.code === 'object_not_found') break;
+          await notion.pages.create({
+            parent: { database_id: databaseId },
+            properties: {
+              Name: { title: [{ text: { content: title } }] },
+              Author: { rich_text: [{ text: { content: bm.author || '' } }] },
+              Link: { url: bm.link },
+              Time: { date: { start: bm.time || new Date().toISOString() } },
+            },
+            children: blocks,
+          });
+
+          uploaded++;
+          console.log('✅');
+        } else {
+          console.log('⚠️ 文本为空');
         }
-        await sleep(500);
+      } catch (err) {
+        console.log(`❌ ${err.message}`);
+        if (err.code === 'validation_error' || err.code === 'object_not_found') break;
       }
+      await sleep(500);
     }
 
-    console.log(`✅ 完成 ${uploaded}/${filtered.length}`);
+    console.log(`\n✅ 完成 ${uploaded}/${filtered.length}`);
   } catch (err) {
     console.error(`❌ ${err.message}`);
     process.exit(1);
