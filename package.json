@@ -1,0 +1,27 @@
+{
+  "name": "xaction",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nirholas/XActions.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/nirholas/XActions/issues"
+  },
+  "homepage": "https://github.com/nirholas/XActions#readme",
+  "dependencies": {
+    "@notionhq/client": "^5.23.2",
+    "remotion": "^4.0.498",
+    "xactions": "^3.4.4"
+  }
+}
