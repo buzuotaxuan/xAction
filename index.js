@@ -76,9 +76,6 @@ function buildBlocks(text, images, link) {
   return blocks;
 }
 
-/**
- * 获取 Notion 最新一条记录的 Link（按 Create_Time 倒序）
- */
 async function getLatestLink(token, databaseId) {
   try {
     const resp = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
@@ -128,8 +125,7 @@ async function main() {
 
   const notion = new Client({ auth: notionToken });
 
-  // 获取最新一条记录的 Link 作为游标
-  console.log('📋 获取 Notion 最新记录...');
+  console.log('📋 获取游标...');
   const cursorLink = await getLatestLink(notionToken, databaseId);
   if (cursorLink) {
     console.log(`   游标: ${cursorLink}`);
@@ -159,13 +155,12 @@ async function main() {
       return;
     }
 
-    // 按游标过滤：找到匹配的 link，丢弃它及之后的所有书签
     let filtered = bookmarks;
     if (cursorLink) {
       const matchIdx = bookmarks.findIndex(bm => bm.link === cursorLink);
       if (matchIdx !== -1) {
         filtered = bookmarks.slice(0, matchIdx);
-        console.log(`   在位置 ${matchIdx + 1} 匹配到游标，丢弃后续 ${bookmarks.length - matchIdx} 条`);
+        console.log(`   匹配游标位置 ${matchIdx + 1}，丢弃后续 ${bookmarks.length - matchIdx} 条`);
       }
     }
 
@@ -196,7 +191,7 @@ async function main() {
               Author: { rich_text: [{ text: { content: bm.author || '' } }] },
               Link: { url: bm.link },
               Time: { date: { start: bm.time || new Date().toISOString() } },
-              Create_Time: { date: { start: new Date().toISOString() } },
+              Create_Time: { number: Date.now() },
             },
             children: blocks,
           });
@@ -209,7 +204,7 @@ async function main() {
       } catch (err) {
         console.log(`❌ ${err.message}`);
         if (err.code === 'validation_error') {
-          console.log('   请在 Notion 数据库中添加 Create_Time 属性 (日期类型)');
+          console.log('   请在 Notion 中将 Create_Time 改为数字类型');
           break;
         }
         if (err.code === 'object_not_found') break;
