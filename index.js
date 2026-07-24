@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * X 书签 → Notion（增量同步，按时间过滤）
+ * X 书签 → Notion（增量同步，取最新一条 Link 作为游标）
  */
 
 import puppeteer from 'puppeteer';
@@ -76,7 +76,10 @@ function buildBlocks(text, images, link) {
   return blocks;
 }
 
-async function getLatestTime(token, databaseId) {
+/**
+ * 获取 Notion 最新一条记录的 Link（按 Create_Time 倒序）
+ */
+async function getLatestLink(token, databaseId) {
   try {
     const resp = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
       method: 'POST',
@@ -86,30 +89,22 @@ async function getLatestTime(token, databaseId) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        sorts: [{ property: 'Time', direction: 'descending' }],
+        sorts: [{ property: 'Create_Time', direction: 'descending' }],
         page_size: 1,
       }),
     });
 
-    if (!resp.ok) {
-      console.log(`   ⚠️  Notion query 返回 ${resp.status}`);
-      return null;
-    }
+    if (!resp.ok) return null;
 
     const data = await resp.json();
-    console.log(`   📋 查询结果: ${data.results.length} 条`);
-
     if (data.results.length === 0) return null;
 
-    const timeProp = data.results[0].properties['Time'];
-    console.log(`   📋 Time 属性: type=${timeProp?.type}, value=${JSON.stringify(timeProp)}`);
-
-    if (timeProp?.type === 'date' && timeProp.date?.start) {
-      return timeProp.date.start;
+    const linkProp = data.results[0].properties['Link'];
+    if (linkProp?.type === 'url' && linkProp.url) {
+      return linkProp.url;
     }
     return null;
-  } catch (err) {
-    console.log(`   ❌ getLatestTime 异常: ${err.message}`);
+  } catch {
     return null;
   }
 }
@@ -133,14 +128,13 @@ async function main() {
 
   const notion = new Client({ auth: notionToken });
 
+  // 获取最新一条记录的 Link 作为游标
   console.log('📋 获取 Notion 最新记录...');
-  const latestTimeStr = await getLatestTime(notionToken, databaseId);
-
-  if (latestTimeStr) {
-    console.log(`📋 Notion 最新时间: "${latestTimeStr}"`);
-    console.log(`📋 解析为 ms: ${new Date(latestTimeStr).getTime()}`);
+  const cursorLink = await getLatestLink(notionToken, databaseId);
+  if (cursorLink) {
+    console.log(`   游标: ${cursorLink}`);
   } else {
-    console.log('📋 数据库为空，全量同步');
+    console.log('   数据库为空，全量同步');
   }
 
   const browser = await puppeteer.launch({
@@ -165,43 +159,17 @@ async function main() {
       return;
     }
 
-    console.log(`📥 共抓取 ${bookmarks.length} 条\n`);
-
-    // ==== 时间对比日志 ====
-    if (latestTimeStr) {
-      console.log('─── 时间对比分析 ───');
-      const latestMs = new Date(latestTimeStr).getTime();
-
-      for (let i = 0; i < Math.min(bookmarks.length, 10); i++) {
-        const bm = bookmarks[i];
-        const title = bm.text ? bm.text.split('\n')[0].slice(0, 50) : '?';
-        const bmTime = bm.time;
-        const bmMs = bmTime ? new Date(bmTime).getTime() : NaN;
-
-        if (isNaN(bmMs)) {
-          console.log(`  [${i + 1}] 时间无效: "${bmTime}" → ${title}`);
-        } else {
-          const isNew = bmMs > latestMs;
-          console.log(`  [${i + 1}] ${isNew ? '✅新' : '⏭跳过'} bm="${bmTime}" (${bmMs}) vs notion="${latestTimeStr}" (${latestMs}) → ${title}`);
-        }
-      }
-      console.log(`  ... (共 ${bookmarks.length} 条)`);
-      console.log('───\n');
-    }
-
-    // 时间过滤
+    // 按游标过滤：找到匹配的 link，丢弃它及之后的所有书签
     let filtered = bookmarks;
-    if (latestTimeStr) {
-      const latestMs = new Date(latestTimeStr).getTime();
-      filtered = bookmarks.filter(bm => {
-        if (!bm.time) return true;
-        const bmMs = new Date(bm.time).getTime();
-        return !isNaN(bmMs) && bmMs > latestMs;
-      });
+    if (cursorLink) {
+      const matchIdx = bookmarks.findIndex(bm => bm.link === cursorLink);
+      if (matchIdx !== -1) {
+        filtered = bookmarks.slice(0, matchIdx);
+        console.log(`   在位置 ${matchIdx + 1} 匹配到游标，丢弃后续 ${bookmarks.length - matchIdx} 条`);
+      }
     }
 
-    const skipped = bookmarks.length - filtered.length;
-    console.log(`需同步 ${filtered.length} 条${skipped > 0 ? ` (跳过 ${skipped} 条)` : ''}\n`);
+    console.log(`共 ${bookmarks.length} 条，需同步 ${filtered.length} 条\n`);
 
     if (filtered.length === 0) {
       console.log('✨ 无新增');
@@ -228,6 +196,7 @@ async function main() {
               Author: { rich_text: [{ text: { content: bm.author || '' } }] },
               Link: { url: bm.link },
               Time: { date: { start: bm.time || new Date().toISOString() } },
+              Create_Time: { date: { start: new Date().toISOString() } },
             },
             children: blocks,
           });
@@ -239,7 +208,11 @@ async function main() {
         }
       } catch (err) {
         console.log(`❌ ${err.message}`);
-        if (err.code === 'validation_error' || err.code === 'object_not_found') break;
+        if (err.code === 'validation_error') {
+          console.log('   请在 Notion 数据库中添加 Create_Time 属性 (日期类型)');
+          break;
+        }
+        if (err.code === 'object_not_found') break;
       }
       await sleep(500);
     }
