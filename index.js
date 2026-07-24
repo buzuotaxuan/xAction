@@ -1,14 +1,48 @@
 #!/usr/bin/env node
 
 /**
- * X 书签 → Notion（增量同步，取最新一条 Link 作为游标）
+ * X 书签 → Notion（增量同步，登录失败邮件通知）
  */
 
 import puppeteer from 'puppeteer';
 import { loginWithCookie, scrapeBookmarks } from 'xactions';
 import { Client } from '@notionhq/client';
+import nodemailer from 'nodemailer';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ─── 邮件通知 ─────────────────────────────────────────────────────
+
+async function sendAlertEmail(subject, body) {
+  const config = JSON.parse(process.env.SMTP_CONFIG || "{}");
+
+  if (!config.host || !config.user || !config.pass || !config.to) {
+    console.log('⚠️  邮件配置不完整，跳过通知');
+    return;
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: config.host,
+      port: parseInt(config.port) || 465,
+      secure: true,
+      auth: { user: config.user, pass: config.pass },
+    });
+
+    await transporter.sendMail({
+      from: config.user,
+      to: config.to,
+      subject: `[X→Notion] ${subject}`,
+      text: body,
+    });
+
+    console.log('📧 通知邮件已发送');
+  } catch (err) {
+    console.error(`📧 邮件发送失败: ${err.message}`);
+  }
+}
+
+// ─── 内容提取 ─────────────────────────────────────────────────────
 
 async function extractTweetContent(page, url) {
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
@@ -106,6 +140,8 @@ async function getLatestLink(token, databaseId) {
   }
 }
 
+// ─── 主流程 ────────────────────────────────────────────────────────
+
 async function main() {
   const args = process.argv.slice(2);
   const limitIdx = args.indexOf('--limit');
@@ -145,7 +181,17 @@ async function main() {
     console.log('🔐 登录...');
     await loginWithCookie(page, authToken);
     console.log('✅ 已登录');
+  } catch (err) {
+    console.error(`❌ 登录失败: ${err.message}`);
+    await sendAlertEmail(
+      '登录失败',
+      `X 书签同步登录失败\n\n时间: ${new Date().toISOString()}\n错误: ${err.message}\n\n请检查 X_AUTH_TOKEN 是否过期。`
+    );
+    await browser.close();
+    process.exit(1);
+  }
 
+  try {
     console.log(`📥 抓取书签 (${limit} 条)...`);
     const bookmarks = await scrapeBookmarks(page, { limit, scrollDelay: 1500 });
 
@@ -171,6 +217,8 @@ async function main() {
       await browser.close();
       return;
     }
+
+    filtered.reverse();
 
     let uploaded = 0;
     for (let i = 0; i < filtered.length; i++) {
@@ -203,11 +251,7 @@ async function main() {
         }
       } catch (err) {
         console.log(`❌ ${err.message}`);
-        if (err.code === 'validation_error') {
-          console.log('   请在 Notion 中将 Create_Time 改为数字类型');
-          break;
-        }
-        if (err.code === 'object_not_found') break;
+        if (err.code === 'validation_error' || err.code === 'object_not_found') break;
       }
       await sleep(500);
     }

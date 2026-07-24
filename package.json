@@ -21,6 +21,8 @@
   "homepage": "https://github.com/nirholas/XActions#readme",
   "dependencies": {
     "@notionhq/client": "^5.23.2",
+    "@types/nodemailer": "^8.0.1",
+    "nodemailer": "^9.0.3",
     "remotion": "^4.0.498",
     "xactions": "^3.4.4"
   }
