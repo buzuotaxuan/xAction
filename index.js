@@ -9,7 +9,6 @@ import { loginWithCookie, scrapeBookmarks } from 'xactions';
 import { Client } from '@notionhq/client';
 import nodemailer from 'nodemailer';
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─── 邮件通知 ─────────────────────────────────────────────────────
 
@@ -46,7 +45,6 @@ async function sendAlertEmail(subject, body) {
 
 async function extractTweetContent(page, url) {
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-  await sleep(3000);
 
   return await page.evaluate(() => {
     const article = document.querySelector('article[data-testid="tweet"]');
@@ -253,7 +251,6 @@ async function main() {
         console.log(`❌ ${err.message}`);
         if (err.code === 'validation_error' || err.code === 'object_not_found') break;
       }
-      await sleep(500);
     }
 
     console.log(`\n✅ 完成 ${uploaded}/${filtered.length}`);
