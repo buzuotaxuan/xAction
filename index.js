@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * X 书签 → Notion（增量同步，登录失败邮件通知）
+ * X 书签 → Notion（增量同步，登录失败邮件通知，同步后取消书签）
  */
 
 import puppeteer from 'puppeteer';
 import { loginWithCookie, scrapeBookmarks, engagementManager } from 'xactions';
 import { Client } from '@notionhq/client';
 import nodemailer from 'nodemailer';
-
 
 // ─── 邮件通知 ─────────────────────────────────────────────────────
 
@@ -48,7 +47,7 @@ async function extractTweetContent(page, url) {
 
   return await page.evaluate(() => {
     const article = document.querySelector('article[data-testid="tweet"]');
-    if (!article) return { text: '', author: '', time: '', images: [] };
+    if (!article) return { text: '', author: '', time: '', images: [], cardUrl: '', cardTitle: '' };
 
     const textEl = article.querySelector('[data-testid="tweetText"]');
     const text = textEl?.textContent || textEl?.innerText || '';
@@ -63,11 +62,21 @@ async function extractTweetContent(page, url) {
       .map(img => img.src)
       .filter((src, i, arr) => arr.indexOf(src) === i);
 
-    return { text, author, time, images };
+    // 提取分享的链接卡片
+    const cardEl = article.querySelector('[data-testid="card.wrapper"]');
+    let cardUrl = '';
+    let cardTitle = '';
+    if (cardEl) {
+      const linkEl = cardEl.querySelector('a[href]');
+      cardUrl = linkEl?.href || '';
+      cardTitle = cardEl.querySelector('span')?.textContent || '';
+    }
+
+    return { text, author, time, images, cardUrl, cardTitle };
   });
 }
 
-function buildBlocks(text, images, link) {
+function buildBlocks(text, images, link, cardUrl, cardTitle) {
   const blocks = [];
 
   if (text) {
@@ -80,12 +89,23 @@ function buildBlocks(text, images, link) {
     }
   }
 
+  if (cardUrl) {
+    blocks.push({ object: 'block', type: 'divider', divider: {} });
+    blocks.push({
+      object: 'block', type: 'bookmark',
+      bookmark: {
+        url: cardUrl,
+        caption: cardTitle ? [{ type: 'text', text: { content: cardTitle } }] : [],
+      },
+    });
+  }
+
   if (link) {
     blocks.push({ object: 'block', type: 'divider', divider: {} });
     blocks.push({
       object: 'block', type: 'paragraph',
       paragraph: { rich_text: [
-        { type: 'text', text: { content: '🔗 ' } },
+        { type: 'text', text: { content: '🔗 原文: ' } },
         { type: 'text', text: { content: link, link: { url: link } } },
       ]},
     });
@@ -183,7 +203,7 @@ async function main() {
     console.error(`❌ 登录失败: ${err.message}`);
     await sendAlertEmail(
       '登录失败',
-      `X 书签同步登录失败\n\n时间: ${new Date().toISOString()}\n错误: ${err.message}\n\n请检查 X_AUTH_TOKEN 是否过期。`
+      `X 书签同步登录失败\n\n时间: ${new Date().toISOString()}\n错误: ${err.message}`
     );
     await browser.close();
     process.exit(1);
@@ -208,6 +228,8 @@ async function main() {
       }
     }
 
+    filtered.reverse();
+
     console.log(`共 ${bookmarks.length} 条，需同步 ${filtered.length} 条\n`);
 
     if (filtered.length === 0) {
@@ -215,8 +237,6 @@ async function main() {
       await browser.close();
       return;
     }
-
-    filtered.reverse();
 
     let uploaded = 0;
     for (let i = 0; i < filtered.length; i++) {
@@ -228,7 +248,7 @@ async function main() {
         const tweet = await extractTweetContent(page, bm.link);
 
         if (tweet.text.length > 0) {
-          const blocks = buildBlocks(tweet.text, tweet.images, bm.link);
+          const blocks = buildBlocks(tweet.text, tweet.images, bm.link, tweet.cardUrl, tweet.cardTitle);
 
           await notion.pages.create({
             parent: { database_id: databaseId },
