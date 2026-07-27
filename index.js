@@ -5,7 +5,7 @@
  */
 
 import puppeteer from 'puppeteer';
-import { loginWithCookie, scrapeBookmarks } from 'xactions';
+import { loginWithCookie, scrapeBookmarks, engagementManager } from 'xactions';
 import { Client } from '@notionhq/client';
 import nodemailer from 'nodemailer';
 
@@ -243,6 +243,7 @@ async function main() {
           });
 
           uploaded++;
+          await engagementManager.unbookmarkTweet(page, bm.link);
           console.log('✅');
         } else {
           console.log('⚠️ 文本为空');
