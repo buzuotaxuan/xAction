@@ -5,7 +5,7 @@
  */
 
 import puppeteer from 'puppeteer';
-import { loginWithCookie, scrapeBookmarks, engagementManager } from 'xactions';
+import { loginWithCookie, scrapeBookmarks } from 'xactions';
 import { Client } from '@notionhq/client';
 import nodemailer from 'nodemailer';
 
@@ -40,6 +40,28 @@ async function sendAlertEmail(subject, body) {
   }
 }
 
+// ─── 取消书签 ─────────────────────────────────────────────────────
+
+async function unbookmarkTweet(page, tweetUrl) {
+  await page.goto(tweetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+
+  try {
+    // 点击书签按钮取消书签
+    await page.waitForSelector('[data-testid="removeBookmark"]', { timeout: 5000 });
+    await page.click('[data-testid="removeBookmark"]');
+    return { success: true };
+  } catch {
+    // 可能已经取消，或者按钮是 bookmark（未收藏状态）
+    try {
+      await page.waitForSelector('[data-testid="bookmark"]', { timeout: 3000 });
+      // 已取消，无需操作
+      return { success: true, already: true };
+    } catch {
+      return { success: false, error: '找不到书签按钮' };
+    }
+  }
+}
+
 // ─── 内容提取 ─────────────────────────────────────────────────────
 
 async function extractTweetContent(page, url) {
@@ -62,7 +84,6 @@ async function extractTweetContent(page, url) {
       .map(img => img.src)
       .filter((src, i, arr) => arr.indexOf(src) === i);
 
-    // 提取分享的链接卡片
     const cardEl = article.querySelector('[data-testid="card.wrapper"]');
     let cardUrl = '';
     let cardTitle = '';
@@ -263,8 +284,8 @@ async function main() {
           });
 
           uploaded++;
-          await engagementManager.unbookmarkTweet(page, bm.link);
-          console.log('✅');
+          const result = await unbookmarkTweet(page, bm.link);
+          console.log(result.success ? '✅' : `⚠️ ${result.error}`);
         } else {
           console.log('⚠️ 文本为空');
         }
