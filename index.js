@@ -1,42 +1,23 @@
 #!/usr/bin/env node
 
-/**
- * X 书签 → Notion（增量同步，登录失败邮件通知，同步后取消书签）
- */
-
 import puppeteer from 'puppeteer';
-import { loginWithCookie, scrapeBookmarks, scrapeThread } from 'xactions';
+import { loginWithCookie, scrapeBookmarks } from 'xactions';
 import { Client } from '@notionhq/client';
 import nodemailer from 'nodemailer';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ─── 邮件通知 ─────────────────────────────────────────────────────
-
 async function sendAlertEmail(subject, body) {
   const config = JSON.parse(process.env.SMTP_CONFIG || '{}');
-  if (!config.host || !config.user || !config.pass || !config.to) {
-    console.log('⚠️  邮件配置不完整，跳过通知');
-    return;
-  }
+  if (!config.host || !config.user || !config.pass || !config.to) return;
   try {
     const transporter = nodemailer.createTransport({
-      host: config.host,
-      port: parseInt(config.port) || 465,
-      secure: true,
+      host: config.host, port: parseInt(config.port) || 465, secure: true,
       auth: { user: config.user, pass: config.pass },
     });
-    await transporter.sendMail({
-      from: config.user, to: config.to,
-      subject: `[X→Notion] ${subject}`, text: body,
-    });
-    console.log('📧 通知邮件已发送');
-  } catch (err) {
-    console.error(`📧 邮件发送失败: ${err.message}`);
-  }
+    await transporter.sendMail({ from: config.user, to: config.to, subject: `[X→Notion] ${subject}`, text: body });
+  } catch (err) { console.error(`📧 邮件发送失败: ${err.message}`); }
 }
-
-// ─── 取消书签 ─────────────────────────────────────────────────────
 
 async function unbookmarkTweet(page, tweetUrl) {
   await page.goto(tweetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
@@ -48,87 +29,79 @@ async function unbookmarkTweet(page, tweetUrl) {
     try {
       await page.waitForSelector('[data-testid="bookmark"]', { timeout: 3000 });
       return { success: true, already: true };
-    } catch {
-      return { success: false, error: '找不到书签按钮' };
-    }
+    } catch { return { success: false, error: '找不到书签按钮' }; }
   }
 }
 
-// ─── 内容提取 ─────────────────────────────────────────────────────
-
 async function extractTweetContent(page, url) {
-  // 使用 xactions 的 scrapeThread 获取推文内容
-  const thread = await scrapeThread(page, url);
-  const main = thread[0] || {};
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(3000);
 
-  // 再提取图片和卡片链接
-  const extra = await page.evaluate(() => {
+  return await page.evaluate(() => {
     const article = document.querySelector('article[data-testid="tweet"]');
-    if (!article) return { images: [], cardUrl: '', cardTitle: '' };
+    if (!article) return { text: '', author: '', time: '', images: [], cardUrl: '', cardTitle: '' };
+
+    // 策略1: 普通推文 [data-testid="tweetText"]
+    let text = '';
+    const textEl = article.querySelector('[data-testid="tweetText"]');
+    if (textEl) text = textEl.textContent || '';
+
+    // 策略2: 长文/文章 [data-contents="true"] 中的 span[data-text="true"]
+    if (!text) {
+      const contents = document.querySelector('[data-contents="true"]');
+      if (contents) {
+        const texts = Array.from(contents.querySelectorAll('span[data-text="true"]'));
+        text = texts.map(s => s.textContent).join('\n');
+      }
+    }
+
+    // 策略3: 兜底取最长 span
+    if (!text) {
+      const spans = article.querySelectorAll('span');
+      const longest = Array.from(spans).sort((a, b) => (b.textContent || '').length - (a.textContent || '').length)[0];
+      text = longest?.textContent || '';
+    }
+
+    const authorEl = article.querySelector('[data-testid="User-Name"]');
+    const author = authorEl?.querySelector('a')?.textContent || '';
+
+    const timeEl = article.querySelector('time');
+    const time = timeEl?.getAttribute('datetime') || '';
 
     const images = Array.from(article.querySelectorAll('img[src*="media"]'))
-      .map(img => img.src)
-      .filter((src, i, arr) => arr.indexOf(src) === i);
+      .map(img => img.src).filter((src, i, arr) => arr.indexOf(src) === i);
 
     const cardEl = article.querySelector('[data-testid="card.wrapper"]');
-    let cardUrl = '';
-    let cardTitle = '';
+    let cardUrl = '', cardTitle = '';
     if (cardEl) {
       const linkEl = cardEl.querySelector('a[href]');
       cardUrl = linkEl?.href || '';
       cardTitle = cardEl.querySelector('span')?.textContent || '';
     }
 
-    return { images, cardUrl, cardTitle };
+    return { text, author, time, images, cardUrl, cardTitle };
   });
-
-  return {
-    text: main.text || '',
-    author: main.author || '',
-    time: main.timestamp || '',
-    images: extra.images,
-    cardUrl: extra.cardUrl,
-    cardTitle: extra.cardTitle,
-  };
 }
 
 function buildBlocks(text, images, link, cardUrl, cardTitle) {
   const blocks = [];
   if (text) {
-    const paragraphs = text.split('\n').filter(Boolean);
-    for (const p of paragraphs) {
-      blocks.push({
-        object: 'block', type: 'paragraph',
-        paragraph: { rich_text: [{ type: 'text', text: { content: p.slice(0, 2000) } }] },
-      });
+    for (const p of text.split('\n').filter(Boolean)) {
+      blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: p.slice(0, 2000) } }] } });
     }
   }
   if (cardUrl) {
     blocks.push({ object: 'block', type: 'divider', divider: {} });
-    blocks.push({
-      object: 'block', type: 'bookmark',
-      bookmark: { url: cardUrl, caption: cardTitle ? [{ type: 'text', text: { content: cardTitle } }] : [] },
-    });
+    blocks.push({ object: 'block', type: 'bookmark', bookmark: { url: cardUrl, caption: cardTitle ? [{ type: 'text', text: { content: cardTitle } }] : [] } });
   }
   if (link) {
     blocks.push({ object: 'block', type: 'divider', divider: {} });
-    blocks.push({
-      object: 'block', type: 'paragraph',
-      paragraph: { rich_text: [
-        { type: 'text', text: { content: '🔗 原文: ' } },
-        { type: 'text', text: { content: link, link: { url: link } } },
-      ]},
-    });
+    blocks.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: '🔗 原文: ' } }, { type: 'text', text: { content: link, link: { url: link } } }] } });
   }
   if (images.length > 0) {
     blocks.push({ object: 'block', type: 'divider', divider: {} });
-    blocks.push({
-      object: 'block', type: 'heading_3',
-      heading_3: { rich_text: [{ type: 'text', text: { content: '📷 图片' } }] },
-    });
-    for (const imgUrl of images) {
-      blocks.push({ object: 'block', type: 'image', image: { type: 'external', external: { url: imgUrl } } });
-    }
+    blocks.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: [{ type: 'text', text: { content: '📷 图片' } }] } });
+    for (const imgUrl of images) blocks.push({ object: 'block', type: 'image', image: { type: 'external', external: { url: imgUrl } } });
   }
   return blocks;
 }
@@ -136,58 +109,32 @@ function buildBlocks(text, images, link, cardUrl, cardTitle) {
 async function getLatestLink(token, databaseId) {
   try {
     const resp = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Notion-Version': '2022-06-28',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        sorts: [{ property: 'Create_Time', direction: 'descending' }],
-        page_size: 1,
-      }),
+      method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sorts: [{ property: 'Create_Time', direction: 'descending' }], page_size: 1 }),
     });
     if (!resp.ok) return null;
     const data = await resp.json();
     if (data.results.length === 0) return null;
     const linkProp = data.results[0].properties['Link'];
-    if (linkProp?.type === 'url' && linkProp.url) return linkProp.url;
-    return null;
+    return linkProp?.type === 'url' && linkProp.url ? linkProp.url : null;
   } catch { return null; }
 }
 
-// ─── 主流程 ────────────────────────────────────────────────────────
-
 async function main() {
   const args = process.argv.slice(2);
-  const limitIdx = args.indexOf('--limit');
-  const limit = limitIdx !== -1 ? parseInt(args[limitIdx + 1]) || 100 : 100;
-
-  const notionToken = process.env.NOTION_TOKEN;
-  const databaseId = process.env.NOTION_DATABASE_ID;
-  const authToken = process.env.X_AUTH_TOKEN;
-
-  if (!notionToken || !databaseId || !authToken) {
-    console.error('❌ 缺少环境变量');
-    process.exit(1);
-  }
+  const limit = args.indexOf('--limit') !== -1 ? parseInt(args[args.indexOf('--limit') + 1]) || 100 : 100;
+  const notionToken = process.env.NOTION_TOKEN, databaseId = process.env.NOTION_DATABASE_ID, authToken = process.env.X_AUTH_TOKEN;
+  if (!notionToken || !databaseId || !authToken) { console.error('❌ 缺少环境变量'); process.exit(1); }
 
   console.log(`🚀 X 书签 → Notion (${new Date().toISOString()})`);
   console.log('='.repeat(60));
 
   const notion = new Client({ auth: notionToken });
-
   console.log('📋 获取游标...');
   const cursorLink = await getLatestLink(notionToken, databaseId);
-  if (cursorLink) console.log(`   游标: ${cursorLink}`);
-  else console.log('   数据库为空，全量同步');
+  console.log(cursorLink ? `   游标: ${cursorLink}` : '   数据库为空，全量同步');
 
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    defaultViewport: { width: 1280, height: 900 },
-  });
-
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'], defaultViewport: { width: 1280, height: 900 } });
   const page = await browser.newPage();
 
   try {
@@ -197,30 +144,20 @@ async function main() {
   } catch (err) {
     console.error(`❌ 登录失败: ${err.message}`);
     await sendAlertEmail('登录失败', `X 书签同步登录失败\n\n时间: ${new Date().toISOString()}\n错误: ${err.message}`);
-    await browser.close();
-    process.exit(1);
+    await browser.close(); process.exit(1);
   }
 
   try {
     console.log(`📥 抓取书签 (${limit} 条)...`);
     const bookmarks = await scrapeBookmarks(page, { limit, scrollDelay: 1500 });
-
-    if (bookmarks.length === 0) {
-      console.log('😕 没有书签');
-      await browser.close();
-      return;
-    }
+    if (bookmarks.length === 0) { console.log('😕 没有书签'); await browser.close(); return; }
 
     let filtered = bookmarks;
     if (cursorLink) {
       const matchIdx = bookmarks.findIndex(bm => bm.link === cursorLink);
-      if (matchIdx !== -1) {
-        filtered = bookmarks.slice(0, matchIdx);
-        console.log(`   匹配游标位置 ${matchIdx + 1}，丢弃后续 ${bookmarks.length - matchIdx} 条`);
-      }
+      if (matchIdx !== -1) { filtered = bookmarks.slice(0, matchIdx); console.log(`   匹配游标位置 ${matchIdx + 1}，丢弃后续 ${bookmarks.length - matchIdx} 条`); }
     }
     filtered.reverse();
-
     console.log(`共 ${bookmarks.length} 条，需同步 ${filtered.length} 条\n`);
     if (filtered.length === 0) { console.log('✨ 无新增'); await browser.close(); return; }
 
@@ -228,11 +165,10 @@ async function main() {
     for (let i = 0; i < filtered.length; i++) {
       const bm = filtered[i];
       const title = bm.text ? bm.text.split('\n')[0].slice(0, 80) : '(无文字)';
-
       try {
         process.stdout.write(`📥 ${i + 1}/${filtered.length} ${title}... `);
         const tweet = await extractTweetContent(page, bm.link);
-        console.log(`text=${tweet.text.length}字 card=${tweet.cardUrl ? '有' : '无'} img=${tweet.images.length}`);
+        console.log(`text=${tweet.text.length} card=${tweet.cardUrl ? '有' : '无'} img=${tweet.images.length}`);
 
         if (tweet.text.length > 0) {
           const blocks = buildBlocks(tweet.text, tweet.images, bm.link, tweet.cardUrl, tweet.cardTitle);
@@ -241,11 +177,9 @@ async function main() {
             properties: {
               Name: { title: [{ text: { content: title } }] },
               Author: { rich_text: [{ text: { content: bm.author || '' } }] },
-              Link: { url: bm.link },
-              Time: { date: { start: bm.time || new Date().toISOString() } },
+              Link: { url: bm.link }, Time: { date: { start: bm.time || new Date().toISOString() } },
               Create_Time: { number: Date.now() },
-            },
-            children: blocks,
+            }, children: blocks,
           });
           uploaded++;
           const result = await unbookmarkTweet(page, bm.link);
@@ -259,12 +193,8 @@ async function main() {
       }
     }
     console.log(`\n✅ 完成 ${uploaded}/${filtered.length}`);
-  } catch (err) {
-    console.error(`❌ ${err.message}`);
-    process.exit(1);
-  } finally {
-    await browser.close();
-  }
+  } catch (err) { console.error(`❌ ${err.message}`); process.exit(1); }
+  finally { await browser.close(); }
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });
