@@ -5,7 +5,7 @@
  */
 
 import puppeteer from 'puppeteer';
-import { loginWithCookie, scrapeBookmarks } from 'xactions';
+import { loginWithCookie, scrapeBookmarks, scrapeThread } from 'xactions';
 import { Client } from '@notionhq/client';
 import nodemailer from 'nodemailer';
 
@@ -57,22 +57,14 @@ async function unbookmarkTweet(page, tweetUrl) {
 // ─── 内容提取 ─────────────────────────────────────────────────────
 
 async function extractTweetContent(page, url) {
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-  await page.waitForSelector('article[data-testid="tweet"]', { timeout: 10000 });
-  await sleep(2000);
+  // 使用 xactions 的 scrapeThread 获取推文内容
+  const thread = await scrapeThread(page, url);
+  const main = thread[0] || {};
 
-  return await page.evaluate(() => {
+  // 再提取图片和卡片链接
+  const extra = await page.evaluate(() => {
     const article = document.querySelector('article[data-testid="tweet"]');
-    if (!article) return { text: '', author: '', time: '', images: [], cardUrl: '', cardTitle: '' };
-
-    const textEl = article.querySelector('[data-testid="tweetText"]');
-    const text = textEl?.textContent || textEl?.innerText || '';
-
-    const authorEl = article.querySelector('[data-testid="User-Name"]');
-    const author = authorEl?.querySelector('a')?.textContent || '';
-
-    const timeEl = article.querySelector('time');
-    const time = timeEl?.getAttribute('datetime') || '';
+    if (!article) return { images: [], cardUrl: '', cardTitle: '' };
 
     const images = Array.from(article.querySelectorAll('img[src*="media"]'))
       .map(img => img.src)
@@ -87,8 +79,17 @@ async function extractTweetContent(page, url) {
       cardTitle = cardEl.querySelector('span')?.textContent || '';
     }
 
-    return { text, author, time, images, cardUrl, cardTitle };
+    return { images, cardUrl, cardTitle };
   });
+
+  return {
+    text: main.text || '',
+    author: main.author || '',
+    time: main.timestamp || '',
+    images: extra.images,
+    cardUrl: extra.cardUrl,
+    cardTitle: extra.cardTitle,
+  };
 }
 
 function buildBlocks(text, images, link, cardUrl, cardTitle) {
