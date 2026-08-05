@@ -179,10 +179,15 @@ async function main() {
               Author: { rich_text: [{ text: { content: bm.author || '' } }] },
               Link: { url: bm.link }, Time: { date: { start: bm.time || new Date().toISOString() } },
               Create_Time: { number: Date.now() },
-            }, children: blocks,
+            }, children: blocks.slice(0, 100),
           });
           uploaded++;
-          const result = await unbookmarkTweet(page, bm.link);
+          if (blocks.length > 100) {
+            await fetch(`https://api.notion.com/v1/blocks/${page.id}/children`, {
+              method: "PATCH", headers: { "Authorization": `Bearer ${notionToken}`, "Notion-Version": "2022-06-28", "Content-Type": "application/json" },
+              body: JSON.stringify({ children: blocks.slice(100) }),
+            });
+          }          const result = await unbookmarkTweet(page, bm.link);
           console.log(`   ✅${result.already ? ' (已取消)' : ''}`);
         } else {
           console.log('   ⚠️  文本为空');
