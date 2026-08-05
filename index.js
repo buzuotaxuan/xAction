@@ -9,16 +9,16 @@ import { loginWithCookie, scrapeBookmarks } from 'xactions';
 import { Client } from '@notionhq/client';
 import nodemailer from 'nodemailer';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // ─── 邮件通知 ─────────────────────────────────────────────────────
 
 async function sendAlertEmail(subject, body) {
-  const config = JSON.parse(process.env.SMTP_CONFIG || "{}");
-
+  const config = JSON.parse(process.env.SMTP_CONFIG || '{}');
   if (!config.host || !config.user || !config.pass || !config.to) {
     console.log('⚠️  邮件配置不完整，跳过通知');
     return;
   }
-
   try {
     const transporter = nodemailer.createTransport({
       host: config.host,
@@ -26,14 +26,10 @@ async function sendAlertEmail(subject, body) {
       secure: true,
       auth: { user: config.user, pass: config.pass },
     });
-
     await transporter.sendMail({
-      from: config.user,
-      to: config.to,
-      subject: `[X→Notion] ${subject}`,
-      text: body,
+      from: config.user, to: config.to,
+      subject: `[X→Notion] ${subject}`, text: body,
     });
-
     console.log('📧 通知邮件已发送');
   } catch (err) {
     console.error(`📧 邮件发送失败: ${err.message}`);
@@ -44,17 +40,13 @@ async function sendAlertEmail(subject, body) {
 
 async function unbookmarkTweet(page, tweetUrl) {
   await page.goto(tweetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-
   try {
-    // 点击书签按钮取消书签
     await page.waitForSelector('[data-testid="removeBookmark"]', { timeout: 5000 });
     await page.click('[data-testid="removeBookmark"]');
     return { success: true };
   } catch {
-    // 可能已经取消，或者按钮是 bookmark（未收藏状态）
     try {
       await page.waitForSelector('[data-testid="bookmark"]', { timeout: 3000 });
-      // 已取消，无需操作
       return { success: true, already: true };
     } catch {
       return { success: false, error: '找不到书签按钮' };
@@ -66,6 +58,8 @@ async function unbookmarkTweet(page, tweetUrl) {
 
 async function extractTweetContent(page, url) {
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+  await page.waitForSelector('article[data-testid="tweet"]', { timeout: 10000 });
+  await sleep(2000);
 
   return await page.evaluate(() => {
     const article = document.querySelector('article[data-testid="tweet"]');
@@ -99,7 +93,6 @@ async function extractTweetContent(page, url) {
 
 function buildBlocks(text, images, link, cardUrl, cardTitle) {
   const blocks = [];
-
   if (text) {
     const paragraphs = text.split('\n').filter(Boolean);
     for (const p of paragraphs) {
@@ -109,18 +102,13 @@ function buildBlocks(text, images, link, cardUrl, cardTitle) {
       });
     }
   }
-
   if (cardUrl) {
     blocks.push({ object: 'block', type: 'divider', divider: {} });
     blocks.push({
       object: 'block', type: 'bookmark',
-      bookmark: {
-        url: cardUrl,
-        caption: cardTitle ? [{ type: 'text', text: { content: cardTitle } }] : [],
-      },
+      bookmark: { url: cardUrl, caption: cardTitle ? [{ type: 'text', text: { content: cardTitle } }] : [] },
     });
   }
-
   if (link) {
     blocks.push({ object: 'block', type: 'divider', divider: {} });
     blocks.push({
@@ -131,7 +119,6 @@ function buildBlocks(text, images, link, cardUrl, cardTitle) {
       ]},
     });
   }
-
   if (images.length > 0) {
     blocks.push({ object: 'block', type: 'divider', divider: {} });
     blocks.push({
@@ -139,13 +126,9 @@ function buildBlocks(text, images, link, cardUrl, cardTitle) {
       heading_3: { rich_text: [{ type: 'text', text: { content: '📷 图片' } }] },
     });
     for (const imgUrl of images) {
-      blocks.push({
-        object: 'block', type: 'image',
-        image: { type: 'external', external: { url: imgUrl } },
-      });
+      blocks.push({ object: 'block', type: 'image', image: { type: 'external', external: { url: imgUrl } } });
     }
   }
-
   return blocks;
 }
 
@@ -163,20 +146,13 @@ async function getLatestLink(token, databaseId) {
         page_size: 1,
       }),
     });
-
     if (!resp.ok) return null;
-
     const data = await resp.json();
     if (data.results.length === 0) return null;
-
     const linkProp = data.results[0].properties['Link'];
-    if (linkProp?.type === 'url' && linkProp.url) {
-      return linkProp.url;
-    }
+    if (linkProp?.type === 'url' && linkProp.url) return linkProp.url;
     return null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 // ─── 主流程 ────────────────────────────────────────────────────────
@@ -202,11 +178,8 @@ async function main() {
 
   console.log('📋 获取游标...');
   const cursorLink = await getLatestLink(notionToken, databaseId);
-  if (cursorLink) {
-    console.log(`   游标: ${cursorLink}`);
-  } else {
-    console.log('   数据库为空，全量同步');
-  }
+  if (cursorLink) console.log(`   游标: ${cursorLink}`);
+  else console.log('   数据库为空，全量同步');
 
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -222,10 +195,7 @@ async function main() {
     console.log('✅ 已登录');
   } catch (err) {
     console.error(`❌ 登录失败: ${err.message}`);
-    await sendAlertEmail(
-      '登录失败',
-      `X 书签同步登录失败\n\n时间: ${new Date().toISOString()}\n错误: ${err.message}`
-    );
+    await sendAlertEmail('登录失败', `X 书签同步登录失败\n\n时间: ${new Date().toISOString()}\n错误: ${err.message}`);
     await browser.close();
     process.exit(1);
   }
@@ -248,16 +218,10 @@ async function main() {
         console.log(`   匹配游标位置 ${matchIdx + 1}，丢弃后续 ${bookmarks.length - matchIdx} 条`);
       }
     }
-
     filtered.reverse();
 
     console.log(`共 ${bookmarks.length} 条，需同步 ${filtered.length} 条\n`);
-
-    if (filtered.length === 0) {
-      console.log('✨ 无新增');
-      await browser.close();
-      return;
-    }
+    if (filtered.length === 0) { console.log('✨ 无新增'); await browser.close(); return; }
 
     let uploaded = 0;
     for (let i = 0; i < filtered.length; i++) {
@@ -267,10 +231,10 @@ async function main() {
       try {
         process.stdout.write(`📥 ${i + 1}/${filtered.length} ${title}... `);
         const tweet = await extractTweetContent(page, bm.link);
+        console.log(`text=${tweet.text.length}字 card=${tweet.cardUrl ? '有' : '无'} img=${tweet.images.length}`);
 
         if (tweet.text.length > 0) {
           const blocks = buildBlocks(tweet.text, tweet.images, bm.link, tweet.cardUrl, tweet.cardTitle);
-
           await notion.pages.create({
             parent: { database_id: databaseId },
             properties: {
@@ -282,19 +246,17 @@ async function main() {
             },
             children: blocks,
           });
-
           uploaded++;
           const result = await unbookmarkTweet(page, bm.link);
-          console.log(result.success ? '✅' : `⚠️ ${result.error}`);
+          console.log(`   ✅${result.already ? ' (已取消)' : ''}`);
         } else {
-          console.log('⚠️ 文本为空');
+          console.log('   ⚠️  文本为空');
         }
       } catch (err) {
-        console.log(`❌ ${err.message}`);
+        console.log(`   ❌ ${err.message}`);
         if (err.code === 'validation_error' || err.code === 'object_not_found') break;
       }
     }
-
     console.log(`\n✅ 完成 ${uploaded}/${filtered.length}`);
   } catch (err) {
     console.error(`❌ ${err.message}`);
@@ -304,7 +266,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch((err) => { console.error(err); process.exit(1); });
