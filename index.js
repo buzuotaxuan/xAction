@@ -164,11 +164,11 @@ async function main() {
     let uploaded = 0;
     for (let i = 0; i < filtered.length; i++) {
       const bm = filtered[i];
-      const title = bm.text ? bm.text.split('\n')[0].slice(0, 80) : '(无文字)';
       try {
-        process.stdout.write(`📥 ${i + 1}/${filtered.length} ${title}... `);
+        process.stdout.write(`📥 ${i + 1}/${filtered.length} ... `);
         const tweet = await extractTweetContent(page, bm.link);
-        console.log(`text=${tweet.text.length} card=${tweet.cardUrl ? '有' : '无'} img=${tweet.images.length}`);
+        const title = (tweet.text || bm.text || '').split('\n')[0].slice(0, 80) || '(无文字)';
+        console.log(`[${title}] text=${tweet.text.length} card=${tweet.cardUrl ? '有' : '无'} img=${tweet.images.length}`);
 
         if (tweet.text.length > 0) {
           const blocks = buildBlocks(tweet.text, tweet.images, bm.link, tweet.cardUrl, tweet.cardTitle);
